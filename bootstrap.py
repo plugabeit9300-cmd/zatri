@@ -46,4 +46,17 @@ def ensure_claude_cli() -> str:
         raise RuntimeError(
             "Installed @anthropic-ai/claude-code but `claude` is still not on PATH."
         )
+
+    # Warm-up call so any first-run onboarding (cache dirs, self-update check)
+    # happens here — not inside the parse_pdf timeout window.
+    try:
+        subprocess.run(
+            [candidate, "--version"],
+            capture_output=True,
+            timeout=30,
+            stdin=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
+
     return candidate

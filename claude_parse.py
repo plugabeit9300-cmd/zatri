@@ -82,7 +82,7 @@ def _extract_json_array(text: str) -> list[dict[str, Any]]:
     return arr
 
 
-def parse_pdf(pdf_path: Path, timeout_s: int = 180) -> list[dict[str, Any]]:
+def parse_pdf(pdf_path: Path, timeout_s: int = 300) -> list[dict[str, Any]]:
     """Run Claude CLI on the given PDF path, return the extracted list."""
     claude_bin = ensure_claude_cli()
 
@@ -94,19 +94,32 @@ def parse_pdf(pdf_path: Path, timeout_s: int = 180) -> list[dict[str, Any]]:
 
     env = os.environ.copy()
     env["CLAUDE_CODE_OAUTH_TOKEN"] = st.secrets["CLAUDE_CODE_OAUTH_TOKEN"]
+    env["CI"] = "1"
+    env["TERM"] = "dumb"
 
-    result = subprocess.run(
-        [
-            claude_bin,
-            "-p", prompt,
-            "--output-format", "json",
-            "--allowed-tools", "Read",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=timeout_s,
-        env=env,
-    )
+    cmd = [
+        claude_bin,
+        "-p", prompt,
+        "--output-format", "json",
+        "--permission-mode", "bypassPermissions",
+    ]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            env=env,
+            stdin=subprocess.DEVNULL,
+        )
+    except subprocess.TimeoutExpired as e:
+        tail_out = (e.stdout or b"").decode(errors="ignore")[-500:] if e.stdout else ""
+        tail_err = (e.stderr or b"").decode(errors="ignore")[-500:] if e.stderr else ""
+        raise ParseError(
+            f"claude timed out after {timeout_s}s.\n"
+            f"stdout tail: {tail_out}\nstderr tail: {tail_err}"
+        ) from e
 
     if result.returncode != 0:
         raise ParseError(
