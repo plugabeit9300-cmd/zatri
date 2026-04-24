@@ -13,6 +13,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+import drive
 import sheets
 from claude_parse import ParseError, parse_pdf, preflight, validate_parts
 
@@ -259,8 +260,21 @@ def _upload_inner(step: str) -> None:
                          disabled=n_import == 0, width="stretch"):
                 to_add = [p for p in validated if new_checked.get(p["id"])]
                 sheets.append_parts(to_add)
-                # create a document entry from the first part's quoteRef
-                q_ref = to_add[0].get("quoteRef") or st.session_state.get("upload_file_name", "Uploaded quote")
+
+                # Archive the PDF to Drive and get a shareable link
+                pdf_link = ""
+                file_name = st.session_state.get("upload_file_name", "quote.pdf")
+                try:
+                    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+                        tmp.write(st.session_state["upload_file_bytes"])
+                        archive_path = Path(tmp.name)
+                    drive_result = drive.upload_pdf(archive_path, file_name)
+                    pdf_link = drive_result.get("webViewLink", "")
+                    archive_path.unlink(missing_ok=True)
+                except Exception as e:
+                    st.warning(f"Sheets write succeeded, but archiving PDF to Drive failed: {e}")
+
+                q_ref = to_add[0].get("quoteRef") or file_name
                 mfrs = " / ".join(sorted({p.get("manufacturer", "") for p in to_add if p.get("manufacturer")}))
                 doc_id = f"d{len(documents) + 1}"
                 sheets.append_document({
@@ -271,6 +285,7 @@ def _upload_inner(step: str) -> None:
                     "date": to_add[0].get("date") or "",
                     "quoteRef": q_ref,
                     "catalogLink": "",
+                    "pdfLink": pdf_link,
                 })
                 load_data.clear()
                 for k in ("upload_step", "parsed_parts", "parse_warnings", "review_checked",
@@ -429,7 +444,15 @@ with tab_docs:
         st.info("No documents yet. Upload a quote to create entries here.")
     else:
         df = pd.DataFrame(documents)
-        st.dataframe(df, width="stretch", hide_index=True)
+        st.dataframe(
+            df,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "pdfLink": st.column_config.LinkColumn("PDF", display_text="Open ↗"),
+                "catalogLink": st.column_config.LinkColumn("Catalog", display_text="Open ↗"),
+            },
+        )
 
 
 # ─────── MAINTENANCE TAB ───────

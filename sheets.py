@@ -28,7 +28,7 @@ PARTS_COLUMNS = [
 ]
 
 DOCUMENTS_COLUMNS = [
-    "id", "title", "manufacturer", "type", "date", "quoteRef", "catalogLink",
+    "id", "title", "manufacturer", "type", "date", "quoteRef", "catalogLink", "pdfLink",
 ]
 
 VENDORS_COLUMNS = [
