@@ -14,7 +14,7 @@ import pandas as pd
 import streamlit as st
 
 import sheets
-from claude_parse import ParseError, parse_pdf, validate_parts
+from claude_parse import ParseError, parse_pdf, preflight, validate_parts
 
 
 SEED_PATH = Path(__file__).parent / "data" / "seed.json"
@@ -169,12 +169,25 @@ def _upload_inner(step: str) -> None:
     if step == "parsing":
         with st.status("Parsing PDF with Claude Code CLI…", expanded=True) as status:
             try:
+                st.write("• Running preflight: `claude --version`")
+                info = preflight()
+                st.write(f"  ↳ binary: `{info['binary']}`")
+                st.write(f"  ↳ version: `{info['version']}`")
+
                 with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
                     tmp.write(st.session_state["upload_file_bytes"])
                     tmp_path = Path(tmp.name)
-                st.write(f"• Saved to `{tmp_path}`")
-                st.write("• Calling `claude -p` (this can take up to 3 min)")
-                raw = parse_pdf(tmp_path)
+                st.write(f"• Saved PDF to `{tmp_path}`")
+                st.write("• Calling `claude -p` — live elapsed time below:")
+                tick_area = st.empty()
+
+                def tick(elapsed: float, _stderr_tail: str) -> None:
+                    tick_area.markdown(
+                        f"⏱ **{elapsed:0.1f} s** elapsed — still running…"
+                    )
+
+                raw = parse_pdf(tmp_path, on_tick=tick)
+                tick_area.markdown("✅ Claude finished.")
                 tmp_path.unlink(missing_ok=True)
                 st.write(f"• Got {len(raw)} line items")
                 next_id = sheets.next_part_id(parts)

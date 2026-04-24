@@ -10,8 +10,9 @@ import json
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import streamlit as st
 
@@ -66,6 +67,22 @@ class ParseError(RuntimeError):
     pass
 
 
+def preflight() -> dict[str, str]:
+    """Check the CLI is there and can print its version. Raises ParseError on failure."""
+    claude_bin = ensure_claude_cli()
+    try:
+        r = subprocess.run(
+            [claude_bin, "--version"],
+            capture_output=True, text=True, timeout=30,
+            stdin=subprocess.DEVNULL,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise ParseError(f"'claude --version' itself timed out — CLI is broken on this host. {e}") from e
+    if r.returncode != 0:
+        raise ParseError(f"'claude --version' exit {r.returncode}: {r.stderr.strip() or r.stdout.strip()}")
+    return {"binary": claude_bin, "version": (r.stdout + r.stderr).strip()}
+
+
 def _extract_json_array(text: str) -> list[dict[str, Any]]:
     cleaned = re.sub(r"```(?:json)?", "", text).strip().strip("`").strip()
     start = cleaned.find("[")
@@ -82,8 +99,16 @@ def _extract_json_array(text: str) -> list[dict[str, Any]]:
     return arr
 
 
-def parse_pdf(pdf_path: Path, timeout_s: int = 300) -> list[dict[str, Any]]:
-    """Run Claude CLI on the given PDF path, return the extracted list."""
+def parse_pdf(
+    pdf_path: Path,
+    timeout_s: int = 300,
+    on_tick: Callable[[float, str], None] | None = None,
+) -> list[dict[str, Any]]:
+    """Run Claude CLI on the given PDF path, return the extracted list.
+
+    on_tick(elapsed_seconds, latest_stderr_tail) is called about twice per second
+    while the subprocess is alive, so the UI can render a live heartbeat.
+    """
     claude_bin = ensure_claude_cli()
 
     prompt = (
@@ -104,33 +129,45 @@ def parse_pdf(pdf_path: Path, timeout_s: int = 300) -> list[dict[str, Any]]:
         "--permission-mode", "bypassPermissions",
     ]
 
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-            env=env,
-            stdin=subprocess.DEVNULL,
-        )
-    except subprocess.TimeoutExpired as e:
-        tail_out = (e.stdout or b"").decode(errors="ignore")[-500:] if e.stdout else ""
-        tail_err = (e.stderr or b"").decode(errors="ignore")[-500:] if e.stderr else ""
-        raise ParseError(
-            f"claude timed out after {timeout_s}s.\n"
-            f"stdout tail: {tail_out}\nstderr tail: {tail_err}"
-        ) from e
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+        stdin=subprocess.DEVNULL,
+    )
 
-    if result.returncode != 0:
+    start = time.monotonic()
+    while proc.poll() is None:
+        elapsed = time.monotonic() - start
+        if elapsed > timeout_s:
+            proc.kill()
+            try:
+                stdout, stderr = proc.communicate(timeout=5)
+            except Exception:
+                stdout, stderr = "", ""
+            raise ParseError(
+                f"claude timed out after {timeout_s}s.\n"
+                f"stdout tail: {stdout[-500:]}\nstderr tail: {stderr[-500:]}"
+            )
+        if on_tick:
+            on_tick(elapsed, "")
+        time.sleep(0.5)
+
+    stdout, stderr = proc.communicate()
+
+    if proc.returncode != 0:
         raise ParseError(
-            f"claude exited {result.returncode}: "
-            f"{(result.stderr or result.stdout or '').strip()[:500]}"
+            f"claude exited {proc.returncode}.\n"
+            f"stderr: {(stderr or '').strip()[:800]}\n"
+            f"stdout: {(stdout or '').strip()[:800]}"
         )
 
     try:
-        payload = json.loads(result.stdout)
+        payload = json.loads(stdout)
     except json.JSONDecodeError as e:
-        raise ParseError(f"CLI did not return JSON wrapper: {e}\n{result.stdout[:500]}") from e
+        raise ParseError(f"CLI did not return JSON wrapper: {e}\n{stdout[:800]}") from e
 
     if payload.get("is_error"):
         raise ParseError(f"Claude reported error: {payload.get('result', payload)}")
